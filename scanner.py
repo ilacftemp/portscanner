@@ -1,6 +1,7 @@
 from scapy.all import sr1, IP, TCP, UDP, Raw, ICMP
 import socket
 import re
+import ipaddress
 
 WELL_KNOWN_PORTS = {
     20: "FTP Data",
@@ -25,7 +26,7 @@ def scanner():
 
     if tipo_scan == "r":
         prefixo = consegue_prefixo()
-        ip_com_pref = f"{ip}/{prefixo}"
+        ip = f"{ip}/{prefixo}"
 
     while True:
         resposta = input("\nDeseja fazer um scan de um range específico de portas? (s/n): ").strip().lower()
@@ -37,26 +38,30 @@ def scanner():
             primeira_porta, ultima_porta = -1, -1
             break
         else:
-            print("Opção inválida. Digite 's' para sim ou 'n' para não.")
+            print("Opção inválida.")
 
     while (protocolo := input("\nDeseja escanear apenas um tipo de protocolo? (tcp/udp/ambos): ").strip().lower()) not in ["tcp", "udp", "ambos"]:
-        print("Protocolo inválido. Escolha entre 'tcp', 'udp' ou 'ambos'.")
+        print("Protocolo inválido.")
 
-    if tipo_scan == "h":
-        if protocolo in ["tcp", "ambos"]:
-            escanear_portas_tcp(ip, primeira_porta, ultima_porta)
-        if protocolo in ["udp", "ambos"]:
-            escanear_portas_udp(ip, primeira_porta, ultima_porta)
+    if "/" in ip:
+        rede = ipaddress.ip_network(ip, strict=False)
+        for host in rede.hosts():
+            print(f"\nEscaneando o host {host}...")
+            escanear_portas(str(host), primeira_porta, ultima_porta, protocolo)
     else:
-        for sub in range(1, 2**(32-int(prefixo))):
-            ip = ip.split(".")[:3]
-            ip.append(str(sub))
-            ip = ".".join(ip)
-            print(f"\nEscaneando a sub-rede {ip}...")
-            if protocolo in ["tcp", "ambos"]:
-                escanear_portas_tcp(str(ip), primeira_porta, ultima_porta)
-            if protocolo in ["udp", "ambos"]:
-                escanear_portas_udp(str(ip), primeira_porta, ultima_porta)
+        escanear_portas(ip, primeira_porta, ultima_porta, protocolo)
+
+    
+def escanear_portas(ip, primeira_porta, ultima_porta, protocolo):
+    portas = range(primeira_porta, ultima_porta + 1) if primeira_porta != -1 else WELL_KNOWN_PORTS.keys()
+    
+    if protocolo in ["tcp", "ambos"]:
+        for porta in portas:
+            escanear_portas_tcp(ip, porta)
+    
+    if protocolo in ["udp", "ambos"]:
+        for porta in portas:
+            escanear_portas_udp(ip, porta)
 
 
 def consegue_ip():
@@ -94,112 +99,51 @@ def range_portas():
         return portas[0], portas[1]
 
 
-def escanear_portas_tcp(ip, primeira_porta, ultima_porta):
+def escanear_portas_tcp(ip, porta):
     print(f"\nEscaneando portas TCP em {ip}...")
+    pacote = IP(dst=ip)/TCP(dport=porta, flags="S")
+    resposta = sr1(pacote, timeout=1, verbose=False)
+    servico = WELL_KNOWN_PORTS.get(porta, "Desconhecido")
 
-    if primeira_porta == -1:
-        for porta in WELL_KNOWN_PORTS:
-            pacote = IP(dst=ip)/TCP(dport=porta, flags="S")
-            resposta = sr1(pacote, timeout=1, verbose=False)
-
-            if resposta and resposta.haslayer(TCP):
-                if resposta[TCP].flags == 0x12: # 0x12 = SYN-ACK
-                    status = "aberta"
-                    banner_grabbing(ip, porta)
-                elif resposta[TCP].flags == 0x14:  # 0x14 = RST
-                    status = "fechada"
-                else:
-                    status = "filtrada"
-            else:
-                status = "filtrada"
-
-            servico = WELL_KNOWN_PORTS[porta]
-
-            print(f"Porta {porta}: {status} ({servico})")
+    if resposta and resposta.haslayer(TCP):
+        if resposta[TCP].flags == 0x12: # 0x12 = SYN-ACK
+            status = "aberta"
+            banner_grabbing(ip, porta)
+        elif resposta[TCP].flags == 0x14:  # 0x14 = RST
+            status = "fechada"
     else:
-        for porta in range(primeira_porta, ultima_porta + 1):
-            pacote = IP(dst=ip)/TCP(dport=porta, flags="S")
-            resposta = sr1(pacote, timeout=1, verbose=False)
+        status = "filtrada"
 
-            if resposta and resposta.haslayer(TCP):
-                if resposta[TCP].flags == 0x12: # 0x12 = SYN-ACK
-                    status = "aberta"
-                    banner_grabbing(ip, porta)
-                elif resposta[TCP].flags == 0x14: # 0x14 = RST
-                    status = "fechada"
-                else:
-                    status = "filtrada"
-            else:
-                status = "filtrada"
-
-            servico = WELL_KNOWN_PORTS.get(porta, "Desconhecido")
-
-            print(f"Porta {porta}: {status} ({servico})")
+    print(f"Porta {porta}: {status} ({servico})")
 
 
-def escanear_portas_udp(ip, primeira_porta, ultima_porta):
+def escanear_portas_udp(ip, porta):
     print(f"\nEscaneando portas UDP em {ip}...")
+    pacote = IP(dst=ip) / UDP(dport=porta)
+    resposta = sr1(pacote, timeout=2, verbose=False)
+    servico = WELL_KNOWN_PORTS.get(porta, "Desconhecido")
 
-    if primeira_porta == -1:
-        for porta in WELL_KNOWN_PORTS:
-            pacote = IP(dst=ip) / UDP(dport=porta)
-            resposta = sr1(pacote, timeout=1, verbose=False)
-
-            if resposta is None:
-                status = "possivelmente aberta ou filtrada"
-            elif resposta.haslayer(ICMP) and resposta[ICMP].type == 3 and resposta[ICMP].code == 3:
-                status = "fechada"
-            else:
-                status = "resposta inesperada"
-
-            servico = WELL_KNOWN_PORTS.get(porta, "Desconhecido")
-
-            print(f"Porta {porta}: {status} ({servico})")
-
+    if resposta is None:
+        status = "possivelmente aberta ou filtrada"
+    elif resposta.haslayer(ICMP) and resposta[ICMP].type == 3 and resposta[ICMP].code == 3:
+        status = "fechada"
     else:
-        for porta in range(primeira_porta, ultima_porta + 1):
-            pacote = IP(dst=ip) / UDP(dport=porta)
-            resposta = sr1(pacote, timeout=1, verbose=False)
+        status = "resposta inesperada"
 
-            if resposta is None:
-                status = "possivelmente aberta ou filtrada"
-            elif resposta.haslayer(ICMP) and resposta[ICMP].type == 3 and resposta[ICMP].code == 3:
-                status = "fechada"
-            else:
-                status = "resposta inesperada"
-
-            servico = WELL_KNOWN_PORTS.get(porta, "Desconhecido")
-
-            print(f"Porta {porta}: {status} ({servico})")
+    print(f"Porta {porta}: {status} ({servico})")
             
 
 def banner_grabbing(ip, porta):
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        sock.connect((ip, porta))
-        
-        if porta == 21:  # FTP
-            sock.sendall(b'USER anonymous\r\n')
-        elif porta in [25, 465, 587]:  # SMTP
-            sock.sendall(b'EHLO banner_check\r\n')
-        elif porta in [80, 443]:  # HTTP/HTTPS
-            request = f"GET / HTTP/1.1\r\nHost: {ip}\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
-            sock.sendall(request.encode())
-        
-        banner = sock.recv(1024).decode(errors="ignore").strip()
-        sock.close()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(2)
+    sock.connect((ip, porta))
+    sock.sendall(b"\r\n")
+    banner = sock.recv(1024).decode(errors="ignore").strip()
+    sock.close()
 
-        if any(x in banner for x in ["400 Bad Request", "403 Forbidden", "404 Not Found"]):
-            return "Nenhum SO encontrado"
-
+    if banner:
         so = identificar_so(banner)
-
         print(f"Porta {porta} - SO: {so}")
-        return so
-
-    except Exception:
-        return "Nenhum SO encontrado"
 
 def identificar_so(banner):
     so_patterns = {
